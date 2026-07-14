@@ -11,11 +11,16 @@ el resto del archivo (prompts, parseo de JSON) no cambia.
 import os
 import json
 import re
+from dotenv import load_dotenv
 from openai import OpenAI
 
-# Modelo gratuito recomendado por Google a día de hoy. Si Google lo retira o cambia límites,
-# alternativas dentro del mismo tier gratis: "gemini-2.5-flash-lite", "gemini-3-flash-preview".
-MODEL = os.environ.get("LINGOBOT_MODEL", "gemini-2.5-flash")
+# Carga backend/.env automáticamente si existe (ver .env.example).
+load_dotenv()
+
+# Modelo gratuito recomendado por Google a día de hoy (julio 2026). Google retira modelos
+# antiguos con frecuencia — si este deja de funcionar, revisa https://ai.google.dev/gemini-api/docs/models
+# y prueba con "gemini-flash-latest" o el modelo Flash-Lite más reciente que aparezca ahí.
+MODEL = os.environ.get("LINGOBOT_MODEL", "gemini-3.1-flash-lite")
 
 client = OpenAI(
     api_key=os.environ["GEMINI_API_KEY"],
