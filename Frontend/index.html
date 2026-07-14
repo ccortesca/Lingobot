@@ -19,8 +19,8 @@
   }
   * { box-sizing: border-box; }
   body {
-  margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background: var(--bg); color: var(--text); height: 100vh; height: 100dvh; overflow: hidden;
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh; height: 100dvh; overflow: hidden;
   }
   #app { display: flex; height: 100vh; height: 100dvh; }
 
@@ -46,6 +46,11 @@
   .conv-info { min-width: 0; flex: 1; }
   .conv-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .conv-last { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .conv-delete {
+    background: none; border: none; color: var(--text-dim); font-size: 16px; cursor: pointer;
+    padding: 6px; border-radius: 8px; flex-shrink: 0;
+  }
+  .conv-delete:hover { color: var(--error); background: rgba(255,108,108,0.12); }
 
   /* Main chat */
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -153,8 +158,7 @@
 </div>
 
 <script>
-const API = "https://lingobot-jpio.onrender.com/api";
-//const API = "http://localhost:8000/api"; // cambia por la URL de tu backend desplegado
+const API = "http://localhost:8000/api"; // cambia por la URL de tu backend desplegado
 
 let conversations = [];
 let activeConvId = null;
@@ -186,10 +190,33 @@ function renderConvList() {
       <div class="conv-info">
         <div class="conv-title">${c.title}</div>
         <div class="conv-last">${c.last_message ? c.last_message.slice(0, 40) : "Sin mensajes aún"}</div>
-      </div>`;
+      </div>
+      <button class="conv-delete" title="Eliminar conversación">🗑</button>`;
     div.onclick = () => openConversation(c.id);
+    div.querySelector(".conv-delete").onclick = (e) => {
+      e.stopPropagation(); // que no dispare también openConversation
+      deleteConversation(c.id);
+    };
     list.appendChild(div);
   });
+}
+
+async function deleteConversation(id) {
+  const conv = conversations.find(c => c.id === id);
+  const ok = confirm(`¿Eliminar la conversación de ${conv ? conv.language_name : "este idioma"}? Esta acción no se puede deshacer.`);
+  if (!ok) return;
+
+  await fetch(`${API}/conversations/${id}`, { method: "DELETE" });
+
+  if (activeConvId === id) {
+    activeConvId = null;
+    el("chat-title").textContent = "Selecciona o crea una conversación";
+    el("chat-level").textContent = "";
+    el("msg-input").disabled = true;
+    el("send-btn").disabled = true;
+    el("messages").innerHTML = `<div class="empty-state">Elige un idioma con "+ Nuevo idioma" para empezar tu primera clase.</div>`;
+  }
+  await loadConversations();
 }
 
 async function openConversation(id) {
