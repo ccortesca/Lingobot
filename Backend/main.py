@@ -90,6 +90,14 @@ def get_messages(conv_id: int):
     return db.list_messages(conv_id)
 
 
+@app.delete("/api/conversations/{conv_id}")
+def delete_conversation(conv_id: int):
+    if not db.get_conversation(conv_id):
+        raise HTTPException(404, "Conversación no encontrada")
+    db.delete_conversation(conv_id)
+    return {"deleted": True}
+
+
 @app.post("/api/conversations/{conv_id}/messages")
 def send_message(conv_id: int, req: SendMessageRequest):
     conv = db.get_conversation(conv_id)

@@ -97,6 +97,13 @@ def touch_conversation(conv_id: int):
     conn.close()
 
 
+def delete_conversation(conv_id: int):
+    conn = get_conn()
+    conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))  # ON DELETE CASCADE borra sus mensajes
+    conn.commit()
+    conn.close()
+
+
 # ---------- Mensajes ----------
 
 def add_message(conv_id: int, role: str, content: str, corrections: Optional[list] = None) -> int:
