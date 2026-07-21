@@ -121,9 +121,49 @@
     #sidebar.open { transform: translateX(0); }
     #menu-toggle { display: block; }
   }
+
+  /* Pantalla de login/registro */
+  #auth-screen {
+    position: fixed; inset: 0; background: var(--bg); z-index: 100;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  #auth-screen.hidden { display: none; }
+  #auth-box { width: 100%; max-width: 340px; }
+  #auth-box h1 { text-align: center; font-size: 24px; margin-bottom: 4px; }
+  #auth-box .subtitle { text-align: center; color: var(--text-dim); font-size: 14px; margin-bottom: 24px; }
+  #auth-box input {
+    width: 100%; padding: 13px 14px; border-radius: var(--radius); border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text); font-size: 15px; outline: none; margin-bottom: 10px;
+  }
+  #auth-box button#auth-submit {
+    width: 100%; padding: 13px; border-radius: var(--radius); border: none; background: var(--accent);
+    color: white; font-weight: 600; font-size: 15px; cursor: pointer; margin-top: 4px;
+  }
+  #auth-error { color: var(--error); font-size: 13px; margin-top: 10px; min-height: 16px; text-align: center; }
+  #auth-toggle { text-align: center; margin-top: 18px; font-size: 13px; color: var(--text-dim); }
+  #auth-toggle a { color: var(--accent); cursor: pointer; text-decoration: none; }
+
+  #logout-btn {
+    width: 100%; padding: 8px 14px; border-radius: var(--radius); border: 1px solid var(--border);
+    background: transparent; color: var(--text-dim); font-size: 13px; cursor: pointer; margin-top: 8px;
+  }
+  #logout-btn:hover { color: var(--error); border-color: var(--error); }
 </style>
 </head>
 <body>
+
+<div id="auth-screen">
+  <div id="auth-box">
+    <h1>🗣️ LingoBot</h1>
+    <div class="subtitle" id="auth-subtitle">Inicia sesión para ver tus conversaciones</div>
+    <input id="auth-username" type="text" placeholder="Usuario" autocomplete="username">
+    <input id="auth-password" type="password" placeholder="Contraseña" autocomplete="current-password">
+    <button id="auth-submit">Entrar</button>
+    <div id="auth-error"></div>
+    <div id="auth-toggle">¿No tienes cuenta? <a id="auth-toggle-link">Regístrate</a></div>
+  </div>
+</div>
+
 <div id="app">
   <aside id="sidebar">
     <div id="sidebar-header">
@@ -131,6 +171,9 @@
       <button id="new-lang-btn">+ Nuevo idioma</button>
     </div>
     <div id="conv-list"></div>
+    <div style="padding: 8px 16px 16px;">
+      <button id="logout-btn">Cerrar sesión</button>
+    </div>
   </aside>
 
   <main id="main">
@@ -166,12 +209,90 @@ let activeConvId = null;
 let selectedLangForModal = null;
 const LEVELS = ["A1","A2","B1","B2","C1","C2"];
 let selectedLevel = "A2";
+let authMode = "login"; // "login" | "register"
 
 const el = (id) => document.getElementById(id);
 
+// ---------- Autenticación ----------
+function getToken() { return localStorage.getItem("lingobot_token"); }
+function setToken(t) { localStorage.setItem("lingobot_token", t); }
+function clearToken() { localStorage.removeItem("lingobot_token"); }
+
+// Wrapper de fetch que añade el header Authorization automáticamente.
+async function apiFetch(path, options = {}) {
+  const headers = { ...(options.headers || {}), Authorization: `Bearer ${getToken()}` };
+  const res = await fetch(`${API}${path}`, { ...options, headers });
+  if (res.status === 401) {
+    // sesión caducada o inválida: volvemos a pedir login
+    clearToken();
+    showAuthScreen();
+    throw new Error("No autenticado");
+  }
+  return res;
+}
+
+function showAuthScreen() {
+  el("auth-screen").classList.remove("hidden");
+}
+function hideAuthScreen() {
+  el("auth-screen").classList.add("hidden");
+}
+
+function toggleAuthMode() {
+  authMode = authMode === "login" ? "register" : "login";
+  el("auth-subtitle").textContent = authMode === "login"
+    ? "Inicia sesión para ver tus conversaciones"
+    : "Crea una cuenta para empezar";
+  el("auth-submit").textContent = authMode === "login" ? "Entrar" : "Crear cuenta";
+  el("auth-toggle").innerHTML = authMode === "login"
+    ? '¿No tienes cuenta? <a id="auth-toggle-link">Regístrate</a>'
+    : '¿Ya tienes cuenta? <a id="auth-toggle-link">Inicia sesión</a>';
+  el("auth-toggle-link").onclick = toggleAuthMode;
+  el("auth-error").textContent = "";
+}
+el("auth-toggle-link").onclick = toggleAuthMode;
+
+el("auth-submit").onclick = submitAuth;
+el("auth-password").addEventListener("keydown", (e) => { if (e.key === "Enter") submitAuth(); });
+
+async function submitAuth() {
+  const username = el("auth-username").value.trim();
+  const password = el("auth-password").value;
+  el("auth-error").textContent = "";
+  if (!username || !password) {
+    el("auth-error").textContent = "Rellena usuario y contraseña.";
+    return;
+  }
+  try {
+    const res = await fetch(`${API}/auth/${authMode === "login" ? "login" : "register"}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      el("auth-error").textContent = data.detail || "Error al autenticar.";
+      return;
+    }
+    setToken(data.token);
+    hideAuthScreen();
+    await loadConversations();
+  } catch (e) {
+    el("auth-error").textContent = "No se pudo conectar con el servidor. Inténtalo de nuevo.";
+  }
+}
+
+el("logout-btn").onclick = async () => {
+  try { await apiFetch("/auth/logout", { method: "POST" }); } catch (e) {}
+  clearToken();
+  activeConvId = null;
+  conversations = [];
+  showAuthScreen();
+};
+
 // ---------- Sidebar / historial ----------
 async function loadConversations() {
-  const res = await fetch(`${API}/conversations`);
+  const res = await apiFetch("/conversations");
   conversations = await res.json();
   renderConvList();
 }
@@ -207,7 +328,7 @@ async function deleteConversation(id) {
   const ok = confirm(`¿Eliminar la conversación de ${conv ? conv.language_name : "este idioma"}? Esta acción no se puede deshacer.`);
   if (!ok) return;
 
-  await fetch(`${API}/conversations/${id}`, { method: "DELETE" });
+  await apiFetch(`/conversations/${id}`, { method: "DELETE" });
 
   if (activeConvId === id) {
     activeConvId = null;
@@ -230,7 +351,7 @@ async function openConversation(id) {
   el("msg-input").disabled = false;
   el("send-btn").disabled = false;
 
-  const res = await fetch(`${API}/conversations/${id}/messages`);
+  const res = await apiFetch(`/conversations/${id}/messages`);
   const messages = await res.json();
   renderMessages(messages);
 }
@@ -291,7 +412,7 @@ async function sendMessage() {
   input.value = "";
   addMessageBubble({ role: "user", content: text });
 
-  const res = await fetch(`${API}/conversations/${activeConvId}/messages`, {
+  const res = await apiFetch(`/conversations/${activeConvId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content: text }),
@@ -352,7 +473,7 @@ function renderLevelChips() {
 }
 
 async function createConversation(code) {
-  const res = await fetch(`${API}/conversations`, {
+  const res = await apiFetch("/conversations", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ language_code: code, level: selectedLevel }),
@@ -367,7 +488,12 @@ async function createConversation(code) {
 el("menu-toggle").onclick = () => el("sidebar").classList.toggle("open");
 
 // ---------- Init ----------
-loadConversations();
+if (getToken()) {
+  hideAuthScreen();
+  loadConversations().catch(() => {}); // si el token ya no vale, apiFetch mostrará el login solo
+} else {
+  showAuthScreen();
+}
 </script>
 </body>
 </html>
