@@ -6,15 +6,17 @@ Arrancar en desarrollo:
     pip install -r requirements.txt
     uvicorn main:app --reload --host 0.0.0.0 --port 8000
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
+from typing import Optional
 
 import database as db
 import languages as langs
 import ai_service
+import auth
 
 
 @asynccontextmanager
@@ -49,6 +51,59 @@ class SendMessageRequest(BaseModel):
     content: str
 
 
+class AuthRequest(BaseModel):
+    username: str
+    password: str
+
+
+def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
+    """Extrae y valida el token 'Bearer <token>' del header Authorization."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "No autenticado")
+    token = authorization.removeprefix("Bearer ").strip()
+    session = db.get_session(token)
+    if not session or auth.is_expired(session["expires_at"]):
+        raise HTTPException(401, "Sesión inválida o caducada")
+    return {"id": session["user_id"]}
+
+
+# ---------- Autenticación ----------
+
+@app.post("/api/auth/register")
+def register(req: AuthRequest):
+    if len(req.username.strip()) < 3:
+        raise HTTPException(400, "El usuario debe tener al menos 3 caracteres")
+    if len(req.password) < 6:
+        raise HTTPException(400, "La contraseña debe tener al menos 6 caracteres")
+    if db.get_user_by_username(req.username):
+        raise HTTPException(409, "Ese usuario ya existe")
+
+    salt, pw_hash = auth.hash_password(req.password)
+    user_id = db.create_user(req.username, salt, pw_hash)
+
+    token = auth.generate_token()
+    db.create_session(token, user_id, auth.session_expiry())
+    return {"token": token, "username": req.username}
+
+
+@app.post("/api/auth/login")
+def login(req: AuthRequest):
+    user = db.get_user_by_username(req.username)
+    if not user or not auth.verify_password(req.password, user["password_salt"], user["password_hash"]):
+        raise HTTPException(401, "Usuario o contraseña incorrectos")
+
+    token = auth.generate_token()
+    db.create_session(token, user["id"], auth.session_expiry())
+    return {"token": token, "username": user["username"]}
+
+
+@app.post("/api/auth/logout")
+def logout(authorization: Optional[str] = Header(None)):
+    if authorization and authorization.startswith("Bearer "):
+        db.delete_session(authorization.removeprefix("Bearer ").strip())
+    return {"ok": True}
+
+
 # ---------- Idiomas ----------
 
 @app.get("/api/languages")
@@ -60,17 +115,17 @@ def search_languages(q: str = ""):
 # ---------- Conversaciones ----------
 
 @app.get("/api/conversations")
-def get_conversations():
+def get_conversations(user: dict = Depends(get_current_user)):
     """Historial lateral: una entrada por conversación, con bandera del idioma."""
-    return db.list_conversations()
+    return db.list_conversations(user["id"])
 
 
 @app.post("/api/conversations")
-def create_conversation(req: NewConversationRequest):
+def create_conversation(req: NewConversationRequest, user: dict = Depends(get_current_user)):
     lang = langs.get_language(req.language_code)
     if not lang:
         raise HTTPException(404, "Idioma no soportado")
-    conv_id = db.create_conversation(lang["code"], lang["name"], lang["flag"], req.level)
+    conv_id = db.create_conversation(user["id"], lang["code"], lang["name"], lang["flag"], req.level)
 
     # Mensaje de bienvenida generado por el profesor al abrir el idioma por primera vez.
     try:
@@ -80,27 +135,27 @@ def create_conversation(req: NewConversationRequest):
         # Si falla la IA (p.ej. sin API key configurada en este entorno demo), seguimos sin bloquear.
         pass
 
-    return db.get_conversation(conv_id)
+    return db.get_conversation(conv_id, user["id"])
 
 
 @app.get("/api/conversations/{conv_id}/messages")
-def get_messages(conv_id: int):
-    if not db.get_conversation(conv_id):
+def get_messages(conv_id: int, user: dict = Depends(get_current_user)):
+    if not db.get_conversation(conv_id, user["id"]):
         raise HTTPException(404, "Conversación no encontrada")
     return db.list_messages(conv_id)
 
 
 @app.delete("/api/conversations/{conv_id}")
-def delete_conversation(conv_id: int):
-    if not db.get_conversation(conv_id):
+def delete_conversation(conv_id: int, user: dict = Depends(get_current_user)):
+    if not db.get_conversation(conv_id, user["id"]):
         raise HTTPException(404, "Conversación no encontrada")
     db.delete_conversation(conv_id)
     return {"deleted": True}
 
 
 @app.post("/api/conversations/{conv_id}/messages")
-def send_message(conv_id: int, req: SendMessageRequest):
-    conv = db.get_conversation(conv_id)
+def send_message(conv_id: int, req: SendMessageRequest, user: dict = Depends(get_current_user)):
+    conv = db.get_conversation(conv_id, user["id"])
     if not conv:
         raise HTTPException(404, "Conversación no encontrada")
 
@@ -123,27 +178,32 @@ def send_message(conv_id: int, req: SendMessageRequest):
 
 # ---------- Clase diaria ----------
 
-@app.post("/api/conversations/{conv_id}/daily-class")
-def trigger_daily_class(conv_id: int):
-    """Genera manualmente la clase de hoy (también se puede invocar desde el scheduler)."""
-    conv = db.get_conversation(conv_id)
-    if not conv:
-        raise HTTPException(404, "Conversación no encontrada")
+def _generate_daily_class(conv: dict) -> dict:
     lang = langs.get_language(conv["language_code"])
     class_data = ai_service.get_daily_class(lang["name"], lang["native"], conv["level"])
-    db.add_message(conv_id, "assistant", class_data["reply"], class_data.get("corrections"))
+    db.add_message(conv["id"], "assistant", class_data["reply"], class_data.get("corrections"))
     return class_data
 
 
+@app.post("/api/conversations/{conv_id}/daily-class")
+def trigger_daily_class(conv_id: int, user: dict = Depends(get_current_user)):
+    """Genera manualmente la clase de hoy."""
+    conv = db.get_conversation(conv_id, user["id"])
+    if not conv:
+        raise HTTPException(404, "Conversación no encontrada")
+    return _generate_daily_class(conv)
+
+
 def _run_daily_classes_job():
-    """Job programado: recorre conversaciones con clase diaria activada y las genera.
+    """Job programado: recorre conversaciones (de todos los usuarios) con clase diaria activada
+    y las genera.
     NOTA: para notificación push real al móvil hace falta integrar Web Push (VAPID) o
     Firebase Cloud Messaging aquí, guardando el 'subscription' del dispositivo del usuario
     y llamando a ese servicio tras generar el mensaje. Ver README para la guía de integración."""
-    for conv in db.list_conversations():
+    for conv in db.list_all_conversations():
         if conv["daily_class_enabled"]:
             try:
-                trigger_daily_class(conv["id"])
+                _generate_daily_class(conv)
             except Exception as e:
                 print(f"Error generando clase diaria para conversación {conv['id']}: {e}")
 

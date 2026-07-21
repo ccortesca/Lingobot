@@ -22,8 +22,24 @@ def init_db():
     conn = get_conn()
     conn.executescript(
         """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_salt TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
             language_code TEXT NOT NULL,
             language_name TEXT NOT NULL,
             flag TEXT NOT NULL,
@@ -46,6 +62,12 @@ def init_db():
         );
         """
     )
+    # Migración: si la tabla 'conversations' ya existía de una versión anterior sin user_id,
+    # la añadimos ahora. Las conversaciones antiguas quedarán con user_id NULL (inaccesibles
+    # hasta que se reasignen o se borren manualmente).
+    cols = [row["name"] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()]
+    if "user_id" not in cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN user_id INTEGER REFERENCES users(id)")
     conn.commit()
     conn.close()
 
@@ -54,15 +76,60 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+# ---------- Usuarios y sesiones ----------
+
+def create_user(username: str, password_salt: str, password_hash: str) -> int:
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO users (username, password_salt, password_hash, created_at) VALUES (?, ?, ?, ?)",
+        (username, password_salt, password_hash, now_iso()),
+    )
+    conn.commit()
+    user_id = cur.lastrowid
+    conn.close()
+    return user_id
+
+
+def get_user_by_username(username: str) -> Optional[dict]:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def create_session(token: str, user_id: int, expires_at: str):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        (token, user_id, now_iso(), expires_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_session(token: str) -> Optional[dict]:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM sessions WHERE token = ?", (token,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def delete_session(token: str):
+    conn = get_conn()
+    conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+    conn.commit()
+    conn.close()
+
+
 # ---------- Conversaciones ----------
 
-def create_conversation(language_code: str, language_name: str, flag: str, level: str) -> int:
+def create_conversation(user_id: int, language_code: str, language_name: str, flag: str, level: str) -> int:
     conn = get_conn()
     cur = conn.execute(
         """INSERT INTO conversations
-           (language_code, language_name, flag, level, title, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (language_code, language_name, flag, level, f"{language_name} ({level})", now_iso(), now_iso()),
+           (user_id, language_code, language_name, flag, level, title, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (user_id, language_code, language_name, flag, level, f"{language_name} ({level})", now_iso(), now_iso()),
     )
     conn.commit()
     conv_id = cur.lastrowid
@@ -70,22 +137,38 @@ def create_conversation(language_code: str, language_name: str, flag: str, level
     return conv_id
 
 
-def list_conversations():
+def list_conversations(user_id: int):
     conn = get_conn()
     rows = conn.execute(
         """SELECT c.*,
                   (SELECT content FROM messages m WHERE m.conversation_id = c.id
                    ORDER BY m.id DESC LIMIT 1) AS last_message
            FROM conversations c
-           ORDER BY c.updated_at DESC"""
+           WHERE c.user_id = ?
+           ORDER BY c.updated_at DESC""",
+        (user_id,),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def get_conversation(conv_id: int) -> Optional[dict]:
+def list_all_conversations():
+    """Todas las conversaciones de todos los usuarios. Solo para uso interno (job programado)."""
     conn = get_conn()
-    row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conv_id,)).fetchone()
+    rows = conn.execute("SELECT * FROM conversations WHERE user_id IS NOT NULL").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_conversation(conv_id: int, user_id: Optional[int] = None) -> Optional[dict]:
+    """Si se pasa user_id, solo devuelve la conversación si pertenece a ese usuario (control de acceso)."""
+    conn = get_conn()
+    if user_id is not None:
+        row = conn.execute(
+            "SELECT * FROM conversations WHERE id = ? AND user_id = ?", (conv_id, user_id)
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conv_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
